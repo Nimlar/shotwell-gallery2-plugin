@@ -17,6 +17,6 @@ uninstall:
 	rm -f ~/.gnome2/shotwell/plugins/$(PROGRAM).so
 
 $(PROGRAM).so: $(PROGRAM).vala Makefile
-	valac --save-temps --main=dummy_main -X -D_VERSION='"$(VERSION)"' --pkg=shotwell-plugin-dev-1.0 \
-		-X --shared -X -fPIC $< -o $@
+	valac --save-temps --main=dummy_main -X -D_VERSION='"$(VERSION)"' --pkg=shotwell-plugin-dev-1.0 --pkg=libsoup-2.4 \
+		-X --shared -X -fPIC $< RESTSupport.vala -o $@
 
