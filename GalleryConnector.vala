@@ -105,85 +105,6 @@ private class PublishingParameters {
     }
 }
 
-private Album[] extract_gallery_albums(string document_root) {
-    Album[] result = new Album[0];
-    Album currentAlbum = null;
-    string[] lines;
-    int nbAlbums = 0;
-    int albumIdx = 1; /* as first album is the 1 */
-    
-    currentAlbum = new Album();
-    lines=document_root.split("\n");
-    foreach (string line in lines) {
-        string[] line_splitted;
-        string[] command_splitted;
-      line_splitted = line.split("=");
-      command_splitted = line_splitted[0].split(".");
-      
-      //maybe not the best way. We fill the temp variables title, name, summary, parentname, perms and info, and when the album index is incremetanted we save it.;
-      switch (command_splitted[0]) {
-        case "album" :
-            if(command_splitted[command_splitted.length -1].to_int() != albumIdx) {
-                /* New album description is just found */
-                albumIdx++;
-                /* add previous album to the result Array */
-                result += currentAlbum ;
-                /* create a new Album */
-                currentAlbum = new Album();
-            }
-            switch (command_splitted[1]) {
-                case "name" :
-                    currentAlbum.name = line_splitted[1];
-                    break;
-                case "title" :
-                    currentAlbum.title = line_splitted[1];
-                    break;
-                case "summary" :
-                    currentAlbum.summary = line_splitted[1];
-                    break;
-                case "parent" :
-                    currentAlbum.parentname = line_splitted[1];
-                    break;
-                case "perms" :
-                    switch (command_splitted[2]) {
-                        case "add":
-                            currentAlbum.perms.add = line_splitted[1].to_bool();
-                        break;
-                        case "write":
-                            currentAlbum.perms.write = line_splitted[1].to_bool();
-                        break;
-                        case "del_alb":
-                            currentAlbum.perms.del_alb = line_splitted[1].to_bool();
-                        break;
-                        case "create_sub":
-                            currentAlbum.perms.create_sub = line_splitted[1].to_bool();
-                        break;
-                    }                    
-                    break;
-                case "info" :
-                    if (command_splitted[2] == "extrafields") {
-                        currentAlbum.info.extrafields = line_splitted[1];
-                    }
-                    break;
-                default :
-                    // TODO: log 
-                    break;
-            }
-            break;
-        case "album_count":
-            nbAlbums = line_splitted[1].to_int();
-            break;
-        default :
-            // TODO: log 
-            break; 
-        }
-    }
-    // save last album
-    result += currentAlbum ;
-
-    return result;
-}
-
 public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
     private weak Spit.Publishing.PluginHost host = null;
     private Spit.Publishing.ProgressCallback progress_reporter = null;
@@ -210,6 +131,122 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
             media_type |= p.get_media_type();
         }         
     }
+    
+    private Album[] extract_gallery_albums(string document_root) {
+        Album[] result = new Album[0];
+        Album currentAlbum = null;
+        string[] lines;
+        int nbAlbums = 0;
+        int albumIdx = 1; /* as first album is the 1 */
+        
+        currentAlbum = new Album();
+        lines=document_root.split("\n");
+        foreach (string line in lines) {
+            string[] line_splitted;
+            string[] command_splitted;
+          line_splitted = line.split("=");
+          command_splitted = line_splitted[0].split(".");
+          
+          //maybe not the best way. We fill the temp variables title, name, summary, parentname, perms and info, and when the album index is incremetanted we save it.;
+          switch (command_splitted[0]) {
+            case "album" :
+                if(command_splitted[command_splitted.length -1].to_int() != albumIdx) {
+                    /* New album description is just found */
+                    albumIdx++;
+                    /* add previous album to the result Array */
+                    result += currentAlbum ;
+                    /* create a new Album */
+                    currentAlbum = new Album();
+                }
+                switch (command_splitted[1]) {
+                    case "name" :
+                        currentAlbum.name = line_splitted[1];
+                        break;
+                    case "title" :
+                        currentAlbum.title = line_splitted[1];
+                        break;
+                    case "summary" :
+                        currentAlbum.summary = line_splitted[1];
+                        break;
+                    case "parent" :
+                        currentAlbum.parentname = line_splitted[1];
+                        break;
+                    case "perms" :
+                        switch (command_splitted[2]) {
+                            case "add":
+                                currentAlbum.perms.add = line_splitted[1].to_bool();
+                            break;
+                            case "write":
+                                currentAlbum.perms.write = line_splitted[1].to_bool();
+                            break;
+                            case "del_alb":
+                                currentAlbum.perms.del_alb = line_splitted[1].to_bool();
+                            break;
+                            case "create_sub":
+                                currentAlbum.perms.create_sub = line_splitted[1].to_bool();
+                            break;
+                        }                    
+                        break;
+                    case "info" :
+                        if (command_splitted[2] == "extrafields") {
+                            currentAlbum.info.extrafields = line_splitted[1];
+                        }
+                        break;
+                    default :
+                        // TODO: log 
+                        break;
+                }
+                break;
+            case "album_count":
+                nbAlbums = line_splitted[1].to_int();
+                break;
+            default :
+                // TODO: log 
+                break; 
+            }
+        }
+        // save last album
+        result += currentAlbum ;
+
+        return result;
+    }
+    
+    internal string? get_persistent_username() {
+        return host.get_config_string("username", null);
+    }
+    
+    internal string? get_persistent_password() {
+        return host.get_config_string("password", null);
+    }
+    
+    internal string? get_persistent_url() {
+        return host.get_config_string("url", null);
+    }
+        
+    internal void set_persistent_username(string username) {
+        host.set_config_string("username", username);
+    }
+    
+    internal void set_persistent_password(string password) {
+        host.set_config_string("password", password);
+    }
+    
+    internal void set_persistent_url(string url) {
+        host.set_config_string("url", url);
+    }
+    
+    internal void invalidate_persistent_session() {
+        debug("invalidating persisted Gallery session.");
+
+        host.unset_config_key("username");
+        host.unset_config_key("password");
+        host.unset_config_key("url");
+    }
+    
+    internal bool is_persistent_session_available() {
+        return (get_persistent_username() != null && get_persistent_password() != null && get_persistent_url() != null);
+    }
+
     
     public bool is_running() {
         return running;
@@ -259,7 +296,7 @@ internal class Session : Publishing.RESTSupport.Session {
     public Session() {
     }
     
-    public bool is_authenticated() {
+    public override bool is_authenticated() {
         return (password != null);
     }
 }
