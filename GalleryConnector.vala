@@ -85,14 +85,16 @@ internal class PublishingParameters {
     public string parent_name;
     public int photo_major_axis_size;
         
-    public PublishingParameters.to_new_album(string parent_name, string new_album_dir, string new_album_title) {
+    public PublishingParameters.to_new_album(int photo_major_axis_size, string parent_name, string new_album_dir, string new_album_title) {
+        this.photo_major_axis_size = photo_major_axis_size;
         this.album_name = null;
         this.parent_name= parent_name;
         this.album_dir = new_album_dir;
         this.album_title = new_album_title;
     }
     
-    public PublishingParameters.to_existing_album(string dirname) {
+    public PublishingParameters.to_existing_album(int photo_major_axis_size, string dirname) {
+      this.photo_major_axis_size = photo_major_axis_size;
       this.album_name = dirname ;
     }
     
@@ -457,9 +459,50 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         do_show_publishing_options_pane();
     }
     
+    // ACTION: run a REST transaction over the network to create a new album with the parameters
+    //         specified in 'parameters'. Display a wait pane with an info message in the
+    //         publishing dialog while the transaction is running. This action should only
+    //         occur if 'parameters' describes a publish-to-new-album operation.
+    private void do_create_album(PublishingParameters parameters) {
+        assert(parameters.is_to_new_album());
+        debug("ACTION: creating new album '%s' on remote server.", parameters.get_album_name());
+
+        host.install_static_message_pane(_("Creating album..."));
+
+        host.set_service_locked(true);
+
+        AlbumCreationTransaction creation_trans = new AlbumCreationTransaction(session, session.get_gallery_url(),
+            parameters);
+        creation_trans.network_error.connect(on_album_creation_error);
+        creation_trans.completed.connect(on_album_creation_complete);
+        try{
+            creation_trans.execute();
+        } catch (Spit.Publishing.PublishingError err) {
+            host.post_error(err);
+        }
+    }
+    
+    // ACTION: run a REST transaction over the network to upload the user's photos to the remote
+    //         endpoint. Display a progress pane while the transaction is running.
+    private void do_upload() {
+        debug("ACTION: uploading media items to remote server.");
+
+        host.set_service_locked(true);
+        
+        progress_reporter = host.serialize_publishables(parameters.get_photo_major_axis_size());
+
+        Spit.Publishing.Publishable[] publishables = host.get_publishables();
+        Uploader uploader = new Uploader(session, publishables, parameters);
+
+        uploader.upload_complete.connect(on_upload_complete);
+        uploader.upload_error.connect(on_upload_error);
+
+        uploader.upload(on_upload_status_updated);
+    }
+    
     // EVENT: triggered when the user clicks "Logout" in the publishing options pane
     private void on_publishing_options_logout() {
-        if (has_error() || cancelled)
+        if (!is_running())
             return;
 
         session.deauthenticate();
@@ -469,7 +512,7 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
     
     // EVENT: triggered when the user clicks "Publish" in the publishing options pane
     private void on_publishing_options_publish(PublishingParameters parameters) {
-        if (has_error() || cancelled)
+        if (!is_running())
             return;
         
         this.parameters = parameters;
@@ -480,6 +523,26 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
             do_upload();
         }
         
+    }
+
+    private void on_credentials_go_back() {
+        if (!is_running())
+            return;
+            
+        debug("EVENT: user clicked 'Go Back' in credentials pane.");
+
+        do_show_service_welcome_pane();
+    }
+
+    private void on_credentials_login(string username, string password) {
+        if (!is_running())
+            return;    
+    
+        debug("EVENT: user clicked 'Login' in credentials pane.");
+
+        this.username = username;
+
+        do_network_login(username, password);
     }
     
     private void do_show_publishing_options_pane() {
@@ -811,7 +874,9 @@ internal class LegacyPublishingOptionsPane : Gtk.VBox {
     private const string LAST_ALBUM_CONFIG_KEY = "last_album";
     
     private Gtk.ComboBox existing_albums_combo;
-    private Gtk.Entry new_album_entry;
+    private Gtk.Entry new_album_dir_entry ;
+    private Gtk.Entry new_album_title_entry ;
+    private Gtk.Entry new_album_entry; // TODO REMOVE
     private Gtk.CheckButton public_check;
     private Gtk.ComboBox size_combo;
     private Gtk.RadioButton use_existing_radio;
@@ -987,18 +1052,19 @@ internal class LegacyPublishingOptionsPane : Gtk.VBox {
     private void on_publish_clicked() {
         host.set_config_int(DEFAULT_SIZE_CONFIG_KEY, size_combo.get_active());
         int photo_major_axis_size = size_descriptions[size_combo.get_active()].major_axis_pixels;
-        string album_name;
+        //TODO: string album_name;
         if (create_new_radio.get_active()) {
-            album_name = new_album_entry.get_text();
-            bool is_public = public_check.get_active();
-            publish(new PublishingParameters.to_new_album(photo_major_axis_size, album_name,
-                is_public));
+            string new_album_dir = new_album_dir_entry.get_text();
+            string new_album_title = new_album_title_entry.get_text();
+            publish(new PublishingParameters.to_new_album(photo_major_axis_size,
+                                                          albums[existing_albums_combo.get_active()].name, 
+                                                          new_album_dir.strip(), 
+                                                          new_album_title.strip()));
         } else {
-            album_name = albums[existing_albums_combo.get_active()].name;
-            string album_url = albums[existing_albums_combo.get_active()].url;
-            publish(new PublishingParameters.to_existing_album(photo_major_axis_size, album_url));
+            string album_name = albums[existing_albums_combo.get_active()].name;
+            publish(new PublishingParameters.to_existing_album(photo_major_axis_size, album_name));
         }
-        host.set_config_string(LAST_ALBUM_CONFIG_KEY, album_name);
+        //TODO: host.set_config_string(LAST_ALBUM_CONFIG_KEY, album_name);
     }
 
     private void on_use_existing_radio_clicked() {
@@ -1046,9 +1112,9 @@ internal class LegacyPublishingOptionsPane : Gtk.VBox {
         int default_album_id = -1;
         string last_album = host.get_config_string(LAST_ALBUM_CONFIG_KEY, "");
         for (int i = 0; i < albums.length; i++) {
-            existing_albums_combo.append_text(albums[i].name);
-            if (albums[i].name == last_album ||
-                (albums[i].name == DEFAULT_ALBUM_NAME && default_album_id == -1))
+            existing_albums_combo.append_text(albums[i].title);
+            if (//TODO: albums[i].titl == last_album ||
+                (albums[i].title == DEFAULT_ALBUM_TITLE && default_album_id == -1))
                 default_album_id = i;
         }
 
@@ -1056,20 +1122,20 @@ internal class LegacyPublishingOptionsPane : Gtk.VBox {
             existing_albums_combo.set_sensitive(false);
             use_existing_radio.set_sensitive(false);
             create_new_radio.set_active(true);
-            new_album_entry.grab_focus();
-            new_album_entry.set_text(DEFAULT_ALBUM_NAME);
+            new_album_dir_entry.grab_focus();
+            new_album_dir_entry.set_text(DEFAULT_ALBUM_DIR);
+            new_album_title_entry.set_text(DEFAULT_ALBUM_TITLE);
         } else {
             if (default_album_id >= 0) {
                 use_existing_radio.set_active(true);
                 existing_albums_combo.set_active(default_album_id);
-                new_album_entry.set_sensitive(false);
-                public_check.set_sensitive(false);
+                //TODO: new_album_entry.set_sensitive(false);   
             } else {
                 create_new_radio.set_active(true);
                 existing_albums_combo.set_active(0);
-                new_album_entry.set_text(DEFAULT_ALBUM_NAME);
-                new_album_entry.grab_focus();
-                public_check.set_sensitive(true);
+                new_album_dir_entry.set_text(DEFAULT_ALBUM_DIR);
+                new_album_title_entry.set_text(DEFAULT_ALBUM_TITLE);
+                new_album_dir_entry.grab_focus();
             }
         }
         update_publish_button_sensitivity();
