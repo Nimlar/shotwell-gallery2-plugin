@@ -105,7 +105,12 @@ internal class PublishingParameters {
     public int get_photo_major_axis_size() {
         return photo_major_axis_size;
     }
-    
+
+    public string get_album_name() {
+        assert(is_to_new_album());
+        return album_name;
+    }
+
     // converts a publish-to-new-album parameters object into a publish-to-existing-album
     // parameters object
     public void convert(string album_name) {
@@ -114,6 +119,213 @@ internal class PublishingParameters {
     }
 
 }
+
+private class BaseGalleryTransaction : Publishing.RESTSupport.Transaction {
+    public BaseGalleryTransaction(Session session, string endpoint_url) {
+        base.with_endpoint_url(session, endpoint_url, Publishing.RESTSupport.HttpMethod.POST);
+        
+        add_argument("g2_controller", "remote:GalleryRemote");
+    }
+    
+    public int check_gallery_response() {
+        string[] lines ;
+        string? document = this.get_response() ;
+        if(document != null) {
+          lines=document.split("\n");
+          foreach (string line in lines) {
+              string[] line_splitted;
+              
+              line_splitted = line.split("=");
+              if(line_splitted[0] == "status") {
+                  return line_splitted[1].to_int();
+              }
+          }
+        }
+        return 999 ;
+    }
+    
+    // Helper methode get the auth token from an answer
+    public string find_auth_token() {
+        string[] lines ;
+        string document = this.get_response() ;
+
+        lines=document.split("\n");
+        
+        foreach (string line in lines) {
+            string[] line_splitted;
+            
+            line_splitted = line.split("=");
+            if(line_splitted[0] == "auth_token") {
+                return line_splitted[1];
+            }
+        }
+        return "" ;
+    
+    }
+
+}
+
+private class AuthenticatedTransaction : BaseGalleryTransaction {
+    public AuthenticatedTransaction(Session session, string endpoint_url) {
+        base(session, endpoint_url);
+
+        add_argument("g2_authToken", session.get_auth_token());
+        add_header("Cookie", session.get_cookie());
+    }
+}
+
+private class LoginTransaction : BaseGalleryTransaction {
+    private string url;
+    private string username;
+    private string password;
+    
+    public LoginTransaction(Session session, string url, string username, string password) {
+        base(session, url);
+        this.url = url ;
+        this.username = username ;
+        this.password = password ; 
+        add_argument("g2_form[cmd]", "login");
+        add_argument("g2_form[uname]", username);
+        add_argument("g2_form[password]", password);
+    }
+    
+    public string get_username() {
+        return this.username;
+    }
+    
+    public string get_password() {
+        return this.password;
+    }
+
+    public string get_gallery_url() {
+        return this.url;
+    }
+    
+    // Helper method: retrieves Cookie rom RESTTransaction received
+    // same as the one from PiwigoConnector.vala
+    public string get_cookie_from_transaction() {
+        string? cookie = this.get_header_response("Set-Cookie");
+        if ((cookie != null) && (cookie != "")) {
+            string tmp = cookie.rstr("GALLERYSID=");
+            string[] values = tmp.split(";");
+            string gallery_id = values[0];
+            return gallery_id;
+        } else {
+            return "";
+        }
+    }    
+}
+
+
+private class AlbumDirectoryTransaction : AuthenticatedTransaction {
+    public AlbumDirectoryTransaction(Session session, string url) {
+        base(session, url);
+        add_argument("g2_form[cmd]", "fetch-albums-prune");
+    }
+}
+
+private class AlbumCreationTransaction : AuthenticatedTransaction {
+    public AlbumCreationTransaction(Session session, string url, PublishingParameters parameters) {
+        base(session, url);
+
+        add_argument("g2_form[cmd]", "new-album");
+        add_argument("g2_form[set_albumName]", parameters.parent_name);
+        add_argument("g2_form[newAlbumName]", parameters.album_dir);
+        add_argument("g2_form[newAlbumTitle]", parameters.album_title);
+        add_argument("g2_form[newAlbumDesc]", "");
+    }
+}
+
+
+private class UploadTransaction : AuthenticatedTransaction {
+    private Session session_copy = null;
+    private Spit.Publishing.Publishable  publishable;
+    private string mime_type;
+    private GLib.HashTable<string, string> binary_disposition_table = null;
+        
+    public UploadTransaction(Session session, PublishingParameters params, 
+                                       Spit.Publishing.Publishable  publishable) {
+        base.with_endpoint_url(session, session.get_gallery_url());
+        assert(session.is_authenticated());
+        
+        this.session_copy = session;
+        this.publishable = publishable;
+        this.mime_type = (publishable.get_media_type() == Spit.Publishing.Publisher.MediaType.VIDEO) ?
+            "video/mpeg" : "image/jpeg";
+        debug("GalleryUploadTransaction upload file %s", publishable.get_publishing_name());
+        
+        add_argument("g2_form[cmd]", "add-item");
+        add_argument("g2_form[protocol_version]", "2.10");
+        add_argument("g2_form[set_albumName]", params.album_name);
+        // TODO: add_argument("g2_form[caption]", "");
+        add_argument("g2_form[userfile_name]", publishable.get_publishing_name());
+        add_argument("g2_form[force_filename]", publishable.get_publishing_name());
+        add_argument("g2_form[auto_rotate]", "yes");
+        add_argument("g2_authToken", session.get_auth_token());
+        add_argument("g2_controller", "remote.GalleryRemote");
+        
+        GLib.HashTable<string, string> disposition_table =
+            new GLib.HashTable<string, string>(GLib.str_hash, GLib.str_equal);
+        disposition_table.insert("filename", publishable.get_publishing_name());
+        disposition_table.insert("name", "g2_userfile");
+        set_binary_disposition_table(disposition_table);
+    }
+    
+    protected new void set_binary_disposition_table(GLib.HashTable<string, string> new_disp_table) {
+        binary_disposition_table = new_disp_table;
+    }
+    
+    // Need to copy and paste this method to add the cookie header to the sent message.
+    public override void execute() throws Spit.Publishing.PublishingError {
+
+        Publishing.RESTSupport.Argument[] request_arguments = get_arguments();
+        assert(request_arguments.length > 0);
+
+        // create the multipart request container
+        Soup.Multipart message_parts = new Soup.Multipart("multipart/form-data");
+
+        // attach each REST argument as its own multipart formdata part
+        foreach (Publishing.RESTSupport.Argument arg in request_arguments)
+            message_parts.append_form_string(arg.key, arg.value);
+
+        // attempt to read the binary image data from disk
+        string photo_data;
+        size_t data_length;
+        try {
+            FileUtils.get_contents(publishable.get_serialized_file().get_path(), out photo_data, out data_length);
+        } catch (FileError e) {
+            error("PhotoUploadTransaction: couldn't read data from file '%s'", publishable.get_serialized_file().get_path());
+        }
+
+        // get the sequence number of the part that will soon become the binary image data
+        // part
+        int image_part_num = message_parts.get_length();
+
+        // bind the binary image data read from disk into a Soup.Buffer object so that we
+        // can attach it to the multipart request, then actaully append the buffer
+        // to the multipart request. Then, set the MIME type for this part.
+        Soup.Buffer bindable_data = new Soup.Buffer(Soup.MemoryUse.COPY, photo_data, data_length);
+        message_parts.append_form_file("", publishable.get_serialized_file().get_path(), mime_type, bindable_data);
+
+        // set up the Content-Disposition header for the multipart part that contains the
+        // binary image data
+        unowned Soup.MessageHeaders image_part_header;
+        unowned Soup.Buffer image_part_body;
+        message_parts.get_part(image_part_num, out image_part_header, out image_part_body);
+        image_part_header.set_content_disposition("form-data", binary_disposition_table);
+
+        // create a message that can be sent over the wire whose payload is the multipart container
+        // that we've been building up
+        Soup.Message outbound_message = Soup.form_request_new_from_multipart(get_endpoint_url(), message_parts);
+        outbound_message.request_headers.append("Cookie", session_copy.get_cookie());
+        set_message(outbound_message);
+
+        // send the message and get its response
+        set_is_executed(true);
+        send();
+    }
+}
+
 
 public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
     private weak Spit.Publishing.PluginHost host = null;
@@ -141,6 +353,24 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
             media_type |= p.get_media_type();
         }         
     }
+
+    // Helper method: retrieve internal name for the newly created diretory
+    private string extract_new_created_album_name(Publishing.RESTSupport.Transaction txn) {
+        string[] lines ;
+        string document = txn.get_response() ;
+        
+        lines=document.split("\n");
+        
+        foreach (string line in lines) {
+            string[] line_splitted;
+            
+            line_splitted = line.split("=");
+            if(line_splitted[0] == "album_name") {
+                return line_splitted[1];
+            }
+        }
+        return "" ;
+    } 
     
     private Album[] extract_gallery_albums(string document_root) {
         Album[] result = new Album[0];
@@ -219,68 +449,7 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         result += currentAlbum ;
 
         return result;
-    }
-   
-    private class BaseGalleryTransaction : Publishing.RESTSupport.Transaction {
-        public BaseGalleryTransaction(Session session, string endpoint_url) {
-            base.with_endpoint_url(session, endpoint_url, Publishing.RESTSupport.HttpMethod.POST);
-            
-            add_argument("g2_controller", "remote:GalleryRemote");
-        }
-        
-        public int check_gallery_response() {
-            string[] lines ;
-            string? document = this.get_response() ;
-            if(document != null) {
-              lines=document.split("\n");
-              foreach (string line in lines) {
-                  string[] line_splitted;
-                  
-                  line_splitted = line.split("=");
-                  if(line_splitted[0] == "status") {
-                      return line_splitted[1].to_int();
-                  }
-              }
-            }
-            return 999 ;
-        }
-        
-        // Helper methode get the auth token from an answer
-        public string find_auth_token() {
-            string[] lines ;
-            string document = this.get_response() ;
-
-            lines=document.split("\n");
-            
-            foreach (string line in lines) {
-                string[] line_splitted;
-                
-                line_splitted = line.split("=");
-                if(line_splitted[0] == "auth_token") {
-                    return line_splitted[1];
-                }
-            }
-            return "" ;
-        
-        }
-
-    }
-
-    private class AuthenticatedTransaction : BaseGalleryTransaction {
-        public AuthenticatedTransaction(Session session, string endpoint_url) {
-            base(session, endpoint_url);
-
-            add_argument("g2_authToken", session.get_auth_token());
-            add_header("Cookie", session.get_cookie());
-        }
-    }
-
-    private class AlbumDirectoryTransaction : AuthenticatedTransaction {
-        public AlbumDirectoryTransaction(Session session, string url) {
-            base(session, url);
-            add_argument("g2_form[cmd]", "fetch-albums-prune");
-        }
-    }
+    }   
     
     internal string? get_persistent_username() {
         return host.get_config_string("username", null);
@@ -341,6 +510,13 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
     
     public Spit.Publishing.Service get_service() {
         return service;
+    }
+
+    private void do_show_success_pane() {
+        debug("ACTION: showing success pane.");
+
+        host.set_service_locked(false);
+        host.install_success_pane();
     }
     
     public void start() {
@@ -405,6 +581,43 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         host.post_error(err);
 
     }
+    private void on_upload_status_updated(int file_number, double completed_fraction) {
+        if (!is_running())
+            return;
+
+        debug("EVENT: uploader reports upload %.2f percent complete.", 100.0 * completed_fraction);
+
+        assert(progress_reporter != null);
+
+        progress_reporter(file_number, completed_fraction);
+    }
+    
+    private void on_upload_complete(Publishing.RESTSupport.BatchUploader uploader,
+        int num_published) {
+        if (!is_running())
+            return;
+
+        debug("EVENT: uploader reports upload complete; %d items published.", num_published);
+
+        uploader.upload_complete.disconnect(on_upload_complete);
+        uploader.upload_error.disconnect(on_upload_error);
+
+        do_show_success_pane();
+    }
+
+    private void on_upload_error(Publishing.RESTSupport.BatchUploader uploader,
+        Spit.Publishing.PublishingError err) {
+        if (!is_running())
+            return;
+
+        debug("EVENT: uploader reports upload error = '%s'.", err.message);
+
+        uploader.upload_complete.disconnect(on_upload_complete);
+        uploader.upload_error.disconnect(on_upload_error);
+
+        host.post_error(err);
+    }
+
     
     private void do_show_service_welcome_pane() {
         debug("ACTION: showing service welcome pane.");
@@ -422,6 +635,35 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         host.install_dialog_pane(creds_pane);
     }
     
+    // ACTION: given a username and password, run a REST transaction over the network to
+    //         log a user into the Gallery Web Albums service
+    private void do_network_login(string gallery_url, string username, string password) {
+        host.install_login_wait_pane();
+
+        string my_url = gallery_url;
+
+        if(!my_url.has_suffix(".php")) {
+            if(!my_url.has_suffix("/")) {
+                my_url = my_url + "/";
+            }
+            my_url = my_url + "main.php";
+        }
+
+        if(!my_url.has_prefix("http://") && !my_url.has_prefix("https://")) {
+            my_url = "http://" + my_url;
+        }
+
+
+        LoginTransaction login_trans = new LoginTransaction(session, my_url, username, password);
+        login_trans.network_error.connect(on_login_network_error);
+        login_trans.completed.connect(on_login_network_complete);
+        try {
+            login_trans.execute();
+        } catch (Spit.Publishing.PublishingError err) {
+            host.post_error(err);
+        }
+    }
+
     // ACTION: run a REST transaction over the network to fetch the user's account information
     //         (e.g. the names of the user's albums and their corresponding REST URLs). While
     //         the network transaction is running, display a wait pane with an info message in
@@ -524,6 +766,34 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         }
         
     }
+    private void on_album_creation_complete(Publishing.RESTSupport.Transaction txn) {
+        txn.completed.disconnect(on_album_creation_complete);
+        txn.network_error.disconnect(on_album_creation_error);
+        
+        if (!is_running())
+            return;
+            
+        debug("EVENT: finished creating album on remote server.");
+        
+        parameters.convert(extract_new_created_album_name(txn));
+        do_upload();
+
+        do_upload();
+    }
+
+    private void on_album_creation_error(Publishing.RESTSupport.Transaction bad_txn,
+        Spit.Publishing.PublishingError err) {
+        bad_txn.completed.disconnect(on_album_creation_complete);
+        bad_txn.network_error.disconnect(on_album_creation_error);
+        
+        if (!is_running())
+            return;
+            
+        debug("EVENT: creating album on remote server failed; response = '%s'.",
+            bad_txn.get_response());
+
+        host.post_error(err);
+    }
 
     private void on_credentials_go_back() {
         if (!is_running())
@@ -534,7 +804,7 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         do_show_service_welcome_pane();
     }
 
-    private void on_credentials_login(string username, string password) {
+    private void on_credentials_login(string url, string username, string password) {
         if (!is_running())
             return;    
     
@@ -542,13 +812,13 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
 
         this.username = username;
 
-        do_network_login(username, password);
+        do_network_login(url, username, password);
     }
     
     private void do_show_publishing_options_pane() {
         debug("ACTION: showing publishing options pane.");
         
-        PublishingOptionsPane opts_pane = new PublishingOptionsPane(this, albums);
+        PublishingOptionsPane opts_pane = new PublishingOptionsPane(host, username, albums, media_type);
         opts_pane.publish.connect(on_publishing_options_publish);
         opts_pane.logout.connect(on_publishing_options_logout);
         host.install_dialog_pane(opts_pane);
@@ -643,7 +913,7 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
     private LegacyCredentialsPane wrapped = null;
 
     public signal void go_back();
-    public signal void login(string email, string password);
+    public signal void login(string url, string uname, string password);
 
     public CredentialsPane(Spit.Publishing.PluginHost host, Mode mode = Mode.INTRO,
         string? username = null) {
@@ -654,8 +924,8 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
         go_back();
     }
     
-    protected void notify_login(string email, string password) {
-        login(email, password);
+    protected void notify_login(string url, string uname, string password) {
+        login(url, uname, password);
     }
 
     public Gtk.Widget get_widget() {
@@ -680,10 +950,10 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
 }
 
 internal class LegacyCredentialsPane : Gtk.VBox {
-    private const string INTRO_MESSAGE = _("Enter the email address and password associated with your Picasa Web Albums account.");
-    private const string FAILED_RETRY_MESSAGE = _("Picasa Web Albums didn't recognize the email address and password you entered. To try again, re-enter your email address and password below.");
-    private const string NOT_SET_UP_MESSAGE = _("The email address and password you entered correspond to a Google account that isn't set up for use with Picasa Web Albums. You can set up most accounts by using your browser to log into the Picasa Web Albums site at least once. To try again, re-enter your email address and password below.");
-    private const string ADDITIONAL_SECURITY_MESSAGE = _("The email address and password you entered correspond to a Google account that has been tagged as requiring additional security. You can clear this tag by using your browser to log into Picasa Web Albums. To try again, re-enter your email address and password below.");
+    private const string INTRO_MESSAGE = _("Enter the url of you Gallery installation and username/password associated with this installation.");
+    private const string FAILED_RETRY_MESSAGE = _("FAILED_RETRY_MESSAGE");
+    private const string NOT_SET_UP_MESSAGE = _("NOT_SET_UP_MESSAGE");
+    private const string ADDITIONAL_SECURITY_MESSAGE = _("ADDITIONAL_SECURITY_MESSAGE");
     
     private const int UNIFORM_ACTION_BUTTON_WIDTH = 102;
     public const int STANDARD_CONTENT_LABEL_WIDTH = 500;
@@ -696,7 +966,7 @@ internal class LegacyCredentialsPane : Gtk.VBox {
     private string? username = null;
 
     public signal void go_back();
-    public signal void login(string email, string password);
+    public signal void login(string url, string uname, string password);
 
     public LegacyCredentialsPane(Spit.Publishing.PluginHost host, CredentialsPane.Mode mode =
         CredentialsPane.Mode.INTRO, string? username = null) {
@@ -1139,6 +1409,23 @@ internal class LegacyPublishingOptionsPane : Gtk.VBox {
             }
         }
         update_publish_button_sensitivity();
+    }
+}
+
+internal class Uploader : Publishing.RESTSupport.BatchUploader {
+    private PublishingParameters parameters;
+
+    public Uploader(Session session, Spit.Publishing.Publishable[] publishables,
+        PublishingParameters parameters) {
+        base(session, publishables);
+        
+        this.parameters = parameters;
+    }
+    
+    protected override Publishing.RESTSupport.Transaction create_transaction(
+        Spit.Publishing.Publishable publishable) {
+        return new UploadTransaction((Session) get_session(), parameters,
+            get_current_publishable());
     }
 }
 

@@ -332,6 +332,11 @@ public class Transaction {
         return (string) message.response_body.data;
     }
    
+    public string get_header_response(string selection) {
+        assert(get_is_executed());
+        return (string) message.response_headers.get(selection);
+    }
+    
     public void add_argument(string name, string value) {
         arguments += Argument(name, value);
     }
