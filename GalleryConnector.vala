@@ -555,6 +555,18 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         do_show_credentials_pane(CredentialsPane.Mode.INTRO);
     }
     
+    private void on_session_authenticated() {
+        session.authenticated.disconnect(on_session_authenticated);
+
+        if (!is_running())
+            return;
+
+        debug("EVENT: an authenticated session has become available.");
+        
+        do_save_auth_info();
+        do_fetch_account_information();
+    }
+    
     private void on_initial_album_fetch_complete(Publishing.RESTSupport.Transaction txn) {
         txn.completed.disconnect(on_initial_album_fetch_complete);
         txn.network_error.disconnect(on_initial_album_fetch_error);
@@ -663,15 +675,21 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
             host.post_error(err);
         }
     }
-
-    // ACTION: run a REST transaction over the network to fetch the user's account information
-    //         (e.g. the names of the user's albums and their corresponding REST URLs). While
-    //         the network transaction is running, display a wait pane with an info message in
-    //         the publishing dialog.
+    
+    private void do_save_auth_info() {
+        debug("ACTION: saving authentication information to configuration system.");
+        
+        assert(session.is_authenticated());
+        
+        set_persistent_username(session.get_username());
+        set_persistent_password(session.get_password());
+        set_persistent_url(session.get_gallery_url());
+        set_persistent_auth_token(session.get_auth_token()) ;
+        set_persistent_cookie(session.get_cookie());
+    }
+    
     private void do_fetch_account_information() {
         debug("ACTION: fetching account and album information.");
-        //TODO: TOREMOVE get_host().install_pane(new AccountFetchWaitPane());
-        //TODO: TOREMOVE get_host().lock_service();
         
         host.install_account_fetch_wait_pane();
         host.set_service_locked(true);
@@ -747,7 +765,10 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         if (!is_running())
             return;
 
+        debug("EVENT: user clicked 'Logout' in the publishing options pane.");
+
         session.deauthenticate();
+        invalidate_persistent_session();
 
         do_show_service_welcome_pane();
     }
@@ -813,6 +834,54 @@ public class GalleryPublisher : Spit.Publishing.Publisher, GLib.Object {
         this.username = username;
 
         do_network_login(url, username, password);
+    }
+    
+    // EVENT: triggered when the network transaction that fetches the authentication token for
+    //        the login account is completed successfully
+    private void on_login_network_complete(Publishing.RESTSupport.Transaction txn) {
+        string auth_token;
+        string cookie;
+        
+        txn.completed.disconnect(on_login_network_complete);
+        txn.network_error.disconnect(on_login_network_error);
+
+        if (!is_running())
+            return;
+
+        if (session.is_authenticated()) // ignore these events if the session is already auth'd
+            return;
+            
+        int response = ((BaseGalleryTransaction)txn).check_gallery_response() ; 
+        if (response == 999) {
+            do_show_credentials_pane(CredentialsPane.Mode.NOT_GALLERY_URL);
+            return ;
+        } else if (response != 0) {
+            do_show_credentials_pane(CredentialsPane.Mode.FAILED_RETRY);
+            return ;
+        }
+
+        LoginTransaction login_txn = (LoginTransaction) txn;
+        
+        auth_token = login_txn.find_auth_token();
+        cookie = login_txn.get_cookie_from_transaction();
+        
+        session.authenticated.connect(on_session_authenticated);
+        session.authenticate(login_txn.get_gallery_url(), login_txn.get_username(), login_txn.get_password(), auth_token, cookie);
+    }
+    
+    // EVENT:  triggered when an error occurs in the login transaction
+    private void on_login_network_error(Publishing.RESTSupport.Transaction bad_txn,
+        Spit.Publishing.PublishingError err) {
+        bad_txn.completed.disconnect(on_login_network_complete);
+        bad_txn.network_error.disconnect(on_login_network_error);
+
+        if (!is_running())
+            return;
+
+        if (session.is_authenticated()) // ignore these events if the session is already auth'd
+            return;
+
+        do_show_credentials_pane(CredentialsPane.Mode.FAILED_RETRY);
     }
     
     private void do_show_publishing_options_pane() {
@@ -887,8 +956,7 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
     public enum Mode {
         INTRO,
         FAILED_RETRY,
-        NOT_SET_UP,
-        ADDITIONAL_SECURITY;
+        NOT_GALLERY_URL;
 
         public string to_string() {
             switch (this) {
@@ -898,11 +966,8 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
                 case Mode.FAILED_RETRY:
                     return "FAILED_RETRY";
 
-                case Mode.NOT_SET_UP:
-                    return "NOT_SET_UP";
-
-                case Mode.ADDITIONAL_SECURITY:
-                    return "ADDITIONAL_SECURITY";
+                case Mode.NOT_GALLERY_URL:
+                    return "NOT_GALLERY_URL";
 
                 default:
                     error("unrecognized CredentialsPane.Mode enumeration value");
@@ -950,26 +1015,28 @@ internal class CredentialsPane : Spit.Publishing.DialogPane, GLib.Object {
 }
 
 internal class LegacyCredentialsPane : Gtk.VBox {
-    private const string INTRO_MESSAGE = _("Enter the url of you Gallery installation and username/password associated with this installation.");
-    private const string FAILED_RETRY_MESSAGE = _("FAILED_RETRY_MESSAGE");
-    private const string NOT_SET_UP_MESSAGE = _("NOT_SET_UP_MESSAGE");
-    private const string ADDITIONAL_SECURITY_MESSAGE = _("ADDITIONAL_SECURITY_MESSAGE");
+    private const string INTRO_MESSAGE = _("Enter the Gallery name and address and login and password associated with this Gallery.");
+    private const string FAILED_RETRY_MESSAGE = _("Retry message");
+    private const string NOT_GALLERY_URL_MESSAGE = _("Not a gallery url");
     
     private const int UNIFORM_ACTION_BUTTON_WIDTH = 102;
     public const int STANDARD_CONTENT_LABEL_WIDTH = 500;
-
+        
     private weak Spit.Publishing.PluginHost host = null;
-    private Gtk.Entry email_entry;
+    private Gtk.Entry gallery_url_entry;
+    private Gtk.Entry uname_entry;
     private Gtk.Entry password_entry;
     private Gtk.Button login_button;
     private Gtk.Button go_back_button;
     private string? username = null;
-
+    
     public signal void go_back();
-    public signal void login(string url, string uname, string password);
+    public signal void login(string gallery_url, string uname, string password);
+
+
 
     public LegacyCredentialsPane(Spit.Publishing.PluginHost host, CredentialsPane.Mode mode =
-        CredentialsPane.Mode.INTRO, string? username = null) {
+            CredentialsPane.Mode.INTRO, string? username = null) {
         this.host = host;
         this.username = username;
 
@@ -995,18 +1062,9 @@ internal class LegacyCredentialsPane : Gtk.VBox {
                     "Unrecognized User"), FAILED_RETRY_MESSAGE));
             break;
 
-            case CredentialsPane.Mode.NOT_SET_UP:
-                intro_message_label.set_markup("<b>%s</b>\n\n%s".printf(_("Account Not Ready"),
-                    NOT_SET_UP_MESSAGE));
-                Gtk.SeparatorToolItem long_message_space = new Gtk.SeparatorToolItem();
-                long_message_space.set_draw(false);
-                add(long_message_space);
-                long_message_space.set_size_request(-1, 40);
-            break;
-
-            case CredentialsPane.Mode.ADDITIONAL_SECURITY:
-                intro_message_label.set_markup("<b>%s</b>\n\n%s".printf(_("Additional Security Required"),
-                    ADDITIONAL_SECURITY_MESSAGE));
+            case CredentialsPane.Mode.NOT_GALLERY_URL:
+                intro_message_label.set_markup("<b>%s</b>\n\n%s".printf(_("This is not a Gallery Url"),
+                    NOT_GALLERY_URL_MESSAGE));
                 Gtk.SeparatorToolItem long_message_space = new Gtk.SeparatorToolItem();
                 long_message_space.set_draw(false);
                 add(long_message_space);
@@ -1015,27 +1073,37 @@ internal class LegacyCredentialsPane : Gtk.VBox {
         }
 
         Gtk.Alignment entry_widgets_table_aligner = new Gtk.Alignment(0.5f, 0.5f, 0.0f, 0.0f);
-        Gtk.Table entry_widgets_table = new Gtk.Table(3,2, false);
-        Gtk.Label email_entry_label = new Gtk.Label.with_mnemonic(_("_Email address:"));
-        email_entry_label.set_alignment(0.0f, 0.5f);
+        Gtk.Table entry_widgets_table = new Gtk.Table(4,2, false);
+        Gtk.Label gallery_url_entry_label = new Gtk.Label.with_mnemonic(_("_URL:"));
+        gallery_url_entry_label.set_alignment(0.0f, 0.5f);
+        Gtk.Label uname_entry_label = new Gtk.Label.with_mnemonic(_("_Login:"));
+        uname_entry_label.set_alignment(0.0f, 0.5f);
         Gtk.Label password_entry_label = new Gtk.Label.with_mnemonic(_("_Password:"));
         password_entry_label.set_alignment(0.0f, 0.5f);
-        email_entry = new Gtk.Entry();
+        gallery_url_entry = new Gtk.Entry();
+        gallery_url_entry.changed.connect(on_uname_gallery_url_changed);
+        uname_entry = new Gtk.Entry();
         if (username != null)
-            email_entry.set_text(username);
-        email_entry.changed.connect(on_email_changed);
+            uname_entry.set_text(username);
+        uname_entry.changed.connect(on_uname_gallery_url_changed);
         password_entry = new Gtk.Entry();
         password_entry.set_visibility(false);
-        entry_widgets_table.attach(email_entry_label, 0, 1, 0, 1,
+        entry_widgets_table.attach(gallery_url_entry_label, 0, 1, 0, 1,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
-        entry_widgets_table.attach(password_entry_label, 0, 1, 1, 2,
+        entry_widgets_table.attach(uname_entry_label, 0, 1, 1, 2,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
-        entry_widgets_table.attach(email_entry, 1, 2, 0, 1,
+        entry_widgets_table.attach(password_entry_label, 0, 1, 2, 3,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
-        entry_widgets_table.attach(password_entry, 1, 2, 1, 2,
+        entry_widgets_table.attach(gallery_url_entry, 1, 2, 0, 1,
+            Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
+            Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
+        entry_widgets_table.attach(uname_entry, 1, 2, 1, 2,
+            Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
+            Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
+        entry_widgets_table.attach(password_entry, 1, 2, 2, 3,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 6);
         go_back_button = new Gtk.Button.with_mnemonic(_("Go _Back"));
@@ -1045,20 +1113,20 @@ internal class LegacyCredentialsPane : Gtk.VBox {
         go_back_button.set_size_request(UNIFORM_ACTION_BUTTON_WIDTH, -1);
         login_button = new Gtk.Button.with_mnemonic(_("_Login"));
         login_button.clicked.connect(on_login_button_clicked);
-        login_button.set_sensitive(username != null);
+        login_button.set_sensitive(false);
         Gtk.Alignment login_button_aligner = new Gtk.Alignment(1.0f, 0.5f, 0.0f, 0.0f);
         login_button_aligner.add(login_button);
         login_button.set_size_request(UNIFORM_ACTION_BUTTON_WIDTH, -1);
-        entry_widgets_table.attach(go_back_button_aligner, 0, 1, 2, 3,
+        entry_widgets_table.attach(go_back_button_aligner, 0, 1, 3, 4,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 40);
-        entry_widgets_table.attach(login_button_aligner, 1, 2, 2, 3,
+        entry_widgets_table.attach(login_button_aligner, 1, 2, 3, 4,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL,
             Gtk.AttachOptions.EXPAND | Gtk.AttachOptions.FILL, 6, 40);
         entry_widgets_table_aligner.add(entry_widgets_table);
         add(entry_widgets_table_aligner);
 
-        email_entry_label.set_mnemonic_widget(email_entry);
+        uname_entry_label.set_mnemonic_widget(uname_entry);
         password_entry_label.set_mnemonic_widget(password_entry);
 
         add(bottom_space);
@@ -1066,19 +1134,20 @@ internal class LegacyCredentialsPane : Gtk.VBox {
     }
 
     private void on_login_button_clicked() {
-        login(email_entry.get_text(), password_entry.get_text());
+        login(gallery_url_entry.get_text(), uname_entry.get_text(), password_entry.get_text());
     }
 
     private void on_go_back_button_clicked() {
         go_back();
     }
-
-    private void on_email_changed() {
-        login_button.set_sensitive(email_entry.get_text() != "");
+    
+    private void on_uname_gallery_url_changed() {
+        login_button.set_sensitive((uname_entry.get_text() != "") 
+                                 &&(gallery_url_entry.get_text() != ""));
     }
 
     public void installed() {
-        email_entry.grab_focus();
+        uname_entry.grab_focus();
         password_entry.set_activates_default(true);
         login_button.can_default = true;
         host.set_dialog_default_widget(login_button);
@@ -1429,4 +1498,8 @@ internal class Uploader : Publishing.RESTSupport.BatchUploader {
     }
 }
 
+}
+
+// valac wants a default entry point, so valac gets a default entry point
+private void dummy_main() {
 }

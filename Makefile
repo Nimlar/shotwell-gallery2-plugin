@@ -18,5 +18,7 @@ uninstall:
 
 $(PROGRAM).so: $(PROGRAM).vala Makefile
 	valac --save-temps --main=dummy_main -X -D_VERSION='"$(VERSION)"' --pkg=shotwell-plugin-dev-1.0 --pkg=libsoup-2.4 \
+		-X -I/home/nicolas/sources/shotwell \
+		-X -DGETTEXT_PACKAGE='"shotwell"' \
 		-X --shared -X -fPIC $< RESTSupport.vala -o $@
 
