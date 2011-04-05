@@ -3,6 +3,43 @@
  * This software is licensed under the GNU LGPL (version 2.1 or later).
  * See the COPYING file in this distribution. 
  */
+ 
+ 
+extern const string _VERSION;
+
+private class ShotwellPublishingGallery2 : Object, Spit.Module {
+    private Spit.Pluggable[] pluggables = new Spit.Pluggable[0];
+
+    public ShotwellPublishingGallery2() {
+        pluggables += new GalleryService();
+    }
+    
+    public unowned string get_module_name() {
+        return _("Gallery2 Publishing module");
+    }
+    
+    public unowned string get_version() {
+        return _VERSION;
+    }
+    
+    public unowned string get_id() {
+        return "org.yorba.shotwell.publishing.modulegallery2";
+    }
+    
+    public unowned Spit.Pluggable[]? get_pluggables() {
+        return pluggables;
+    }
+}
+
+// This entry point is required for all SPIT modules.
+public Spit.Module? spit_entry_point(Spit.EntryPointParams *params) {
+    params->module_spit_interface = Spit.negotiate_interfaces(params->host_min_spit_interface,
+        params->host_max_spit_interface, Spit.CURRENT_INTERFACE);
+    
+    return (params->module_spit_interface != Spit.UNSUPPORTED_INTERFACE)
+        ? new ShotwellPublishingGallery2() : null;
+}
+ 
 public class GalleryService : Object, Spit.Pluggable, Spit.Publishing.Service {
     public int get_pluggable_interface(int min_host_interface, int max_host_interface) {
         return Spit.negotiate_interfaces(min_host_interface, max_host_interface,
@@ -20,12 +57,12 @@ public class GalleryService : Object, Spit.Pluggable, Spit.Publishing.Service {
     public void get_info(out Spit.PluggableInfo info) {
         info.authors = "Nicolas Toromanoff";
         info.copyright = _("");
-        //info.translators = Resources.TRANSLATORS;
-        //info.version = _VERSION;
+        info.translators = Resources.TRANSLATORS;
+        info.version = _VERSION;
         //info.website_name = Resources.WEBSITE_NAME;
         //info.website_url = Resources.WEBSITE_URL;
-        //info.is_license_wordwrapped = false;
-        //info.license = Resources.LICENSE;
+        info.is_license_wordwrapped = false;
+        info.license = Resources.LICENSE;
     }
 
     public void activation(bool enabled) {
@@ -304,7 +341,7 @@ private class UploadTransaction : AuthenticatedTransaction {
         // bind the binary image data read from disk into a Soup.Buffer object so that we
         // can attach it to the multipart request, then actaully append the buffer
         // to the multipart request. Then, set the MIME type for this part.
-        Soup.Buffer bindable_data = new Soup.Buffer(Soup.MemoryUse.COPY, photo_data, data_length);
+        Soup.Buffer bindable_data = new Soup.Buffer(Soup.MemoryUse.COPY, photo_data.data[0:data_length]);
         message_parts.append_form_file("", publishable.get_serialized_file().get_path(), mime_type, bindable_data);
 
         // set up the Content-Disposition header for the multipart part that contains the
